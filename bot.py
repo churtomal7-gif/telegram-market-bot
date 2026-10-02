@@ -17,9 +17,15 @@ from telegram.ext import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-cred = credentials.Certificate("firebase_credentials.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+try:
+    if not firebase_admin._apps:
+        cred = credentials.Certificate("firebase_credentials.json")
+        firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("Firebase initialized successfully!")
+except Exception as e:
+    print(f"Firebase Initialization Error: {e}")
+    db = None
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -30,7 +36,7 @@ API_30S = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.jso
 API_1M = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
 
 user_states = {}
-active_signals = {}  # To track running signal tasks per user/chat
+active_signals = {}
 
 app_flask = Flask('')
 
@@ -82,17 +88,20 @@ def process_item(item):
         return None
 
 async def save_data_to_firestore(collection_name, item):
+    if db is None:
+        logger.error("Firestore DB is not initialized!")
+        return
     try:
         doc_id = str(item["period"])
         db.collection(collection_name).document(doc_id).set(item)
-        logger.info(f"Saved to Firestore [{collection_name}] -> Period: {doc_id}")
+        logger.info(f"Successfully Saved to Firestore [{collection_name}] -> Period: {doc_id}")
     except Exception as e:
         logger.error(f"Firestore Save Error: {e}")
 
-# Persistent Reply Keyboard for Signal Control
+# Reply keyboard with START SIGNAL and STOP SIGNAL (No 'GENERATOR')
 def get_main_reply_keyboard():
     keyboard = [
-        [KeyboardButton("🚀 START SIGNAL GENERATOR"), KeyboardButton("🛑 STOP SIGNAL GENERATOR")],
+        [KeyboardButton("🚀 START SIGNAL"), KeyboardButton("🛑 STOP SIGNAL")],
         [KeyboardButton("« MAIN MENU")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -102,7 +111,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_states:
         del user_states[user_id]
         
-    # Stop any active signals for this user on start
     if user_id in active_signals:
         active_signals[user_id] = False
         
@@ -177,7 +185,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("ana_"):
         minutes = int(data.split("_")[1])
-        # Auto-fetch and store recent data to Firestore before analyzing so database is populated
         for url, col in [(API_30S, "history_30s"), (API_1M, "history_1m")]:
             raw_list = await fetch_api_data(url)
             for item_raw in raw_list[:10]:
@@ -193,7 +200,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]
         ]
         await query.message.edit_text(
-            "🚀 *LIVE SIGNAL GENERATOR*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👇 *Select signal timeframe:*", 
+            "🚀 *LIVE SIGNAL*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👇 *Select signal timeframe:*", 
             reply_markup=InlineKeyboardMarkup(keyboard), 
             parse_mode="Markdown"
         )
@@ -214,7 +221,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("start_sig_"):
         tf_type = data.split("_")[2]
         user_states[user_id] = {"signal_timeframe": tf_type}
-        await query.message.reply_text("🚀 *Live Signal Generator Initialized Successfully!* Transmitting real-time signals...", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+        await query.message.reply_text("🚀 *Live Signal Started Successfully!* Transmitting real-time signals...", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
         asyncio.create_task(run_live_signals(query.message.chat_id, query.bot, tf_type, user_id))
 
     elif data == "back_main":
@@ -228,16 +235,15 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Handle Persistent Reply Keyboard Actions
-    if text == "🚀 START SIGNAL GENERATOR":
+    if text == "🚀 START SIGNAL":
         tf_type = user_states.get(user_id, {}).get("signal_timeframe", "30s")
         await update.message.reply_text(f"🚀 *Live Signals Started for {tf_type.upper()}!*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
         asyncio.create_task(run_live_signals(update.message.chat_id, context.bot, tf_type, user_id))
         return
 
-    elif text == "🛑 STOP SIGNAL GENERATOR":
+    elif text == "🛑 STOP SIGNAL":
         active_signals[user_id] = False
-        await update.message.reply_text("🛑 *Live Signal Generator Stopped Successfully.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+        await update.message.reply_text("🛑 *Live Signal Stopped Successfully.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
         return
 
     elif text == "« MAIN MENU":
@@ -272,7 +278,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tf = state_info["timeframe"]
         col_name = "history_30s" if tf == "30S" else "history_1m"
         
-        # Fetch fresh data from API and save to Firestore to ensure collection has documents
         api_url = API_30S if tf == "30S" else API_1M
         raw_list = await fetch_api_data(api_url)
         for item_raw in raw_list:
@@ -280,20 +285,23 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if processed:
                 await save_data_to_firestore(col_name, processed)
 
-        docs = list(db.collection(col_name).limit(15).stream())
-        response_lines = ["📋 *HISTORICAL DATA REPORT*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
-        found = False
-        
-        for doc in docs:
-            d = doc.to_dict()
-            found = True
-            line = f"🔹 `Period: {d['period']} | Num: {d['number']} | Size: {d['size']} | Color: {d['color']}`"
-            response_lines.append(line)
+        if db is not None:
+            docs = list(db.collection(col_name).limit(15).stream())
+            response_lines = ["📋 *HISTORICAL DATA REPORT*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+            found = False
             
-        if found:
-            await update.message.reply_text("\n".join(response_lines), reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+            for doc in docs:
+                d = doc.to_dict()
+                found = True
+                line = f"🔹 `Period: {d['period']} | Num: {d['number']} | Size: {d['size']} | Color: {d['color']}`"
+                response_lines.append(line)
+                
+            if found:
+                await update.message.reply_text("\n".join(response_lines), reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ *Sorry, no data found in Firestore database.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ *Sorry, requested data is currently not available in the database.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+            await update.message.reply_text("❌ *Database connection error.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
             
         if user_id in user_states:
             del user_states[user_id]
@@ -342,7 +350,6 @@ async def run_live_signals(chat_id, bot, tf_type, user_id):
         if raw_list:
             item = process_item(raw_list[0])
             if item:
-                # Save to Firestore so database populates automatically during live signals!
                 await save_data_to_firestore(col_name, item)
                 
                 signal_type = item['size']
@@ -358,7 +365,6 @@ async def run_live_signals(chat_id, bot, tf_type, user_id):
                 )
                 await bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown")
                 
-                # Wait for result check
                 await asyncio.sleep(12)
                 if not active_signals.get(user_id, False):
                     break
@@ -372,7 +378,6 @@ async def run_live_signals(chat_id, bot, tf_type, user_id):
                         status_text = "🎉 *RESULT STATUS: WIN* ✅" if is_win else "❌ *RESULT STATUS: LOSS* ❌"
                         await bot.send_message(chat_id=chat_id, text=status_text, parse_mode="Markdown")
         
-        # Check active status before sleeping
         for _ in range(15):
             if not active_signals.get(user_id, False):
                 break
@@ -380,7 +385,7 @@ async def run_live_signals(chat_id, bot, tf_type, user_id):
 
 def main():
     keep_alive()
-    TOKEN = "8177073363:AAGrp0ndTtV2escKnZw25a1AqIIOnLO_3xw"  # Your Bot Token
+    TOKEN = "7710381534:AAFCw4hB5Q1E_r0o8vO4Qd1k2S3j4K5L6m7"
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
