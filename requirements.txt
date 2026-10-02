@@ -1,6 +1,7 @@
-requests
 python-telegram-bot
-firebase-admin
 flask
-aiohttp
+gspread
+google-auth
+requests
+
 
