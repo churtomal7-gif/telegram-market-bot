@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -98,14 +98,6 @@ async def save_data_to_firestore(collection_name, item):
     except Exception as e:
         logger.error(f"Firestore Save Error: {e}")
 
-# Reply keyboard with START SIGNAL and STOP SIGNAL (No 'GENERATOR')
-def get_main_reply_keyboard():
-    keyboard = [
-        [KeyboardButton("🚀 START SIGNAL"), KeyboardButton("🛑 STOP SIGNAL")],
-        [KeyboardButton("« MAIN MENU")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_states:
@@ -117,7 +109,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inline_keyboard = [
         [InlineKeyboardButton("📊 HISTORICAL DATA", callback_data="menu_historical")],
         [InlineKeyboardButton("📈 ANALYSIS HISTORICAL DATA", callback_data="menu_analysis")],
-        [InlineKeyboardButton("⚡ LIVE SIGNAL GENERATOR", callback_data="menu_signal")],
+        [InlineKeyboardButton("⚡ LIVE SIGNAL", callback_data="menu_signal")],
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard)
     
@@ -128,14 +120,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👇 *Please select an option from the menu below:*"
     )
     
-    reply_kb = get_main_reply_keyboard()
+    # Remove any existing reply keyboards cleanly
+    remove_kb = ReplyKeyboardRemove()
     
     if update.callback_query:
         await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-        await update.callback_query.message.reply_text("📌 *Use the control panel below for signal operations:*", reply_markup=reply_kb, parse_mode="Markdown")
+        await update.callback_query.message.reply_text("✨ Control panel removed for a clean interface.", reply_markup=remove_kb)
     else:
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-        await update.message.reply_text("📌 *Use the control panel below for signal operations:*", reply_markup=reply_kb, parse_mode="Markdown")
+        await update.message.reply_text("✨ Control panel removed for a clean interface.", reply_markup=remove_kb)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -213,7 +206,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]
         ]
         await query.message.edit_text(
-            f"🎯 *Selected Timeframe: {tf_type.upper()}*\n👇 Click below or use the bottom keyboard to start/stop signals:", 
+            f"🎯 *Selected Timeframe: {tf_type.upper()}*\n👇 Click below to start live signals:", 
             reply_markup=InlineKeyboardMarkup(keyboard), 
             parse_mode="Markdown"
         )
@@ -221,8 +214,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("start_sig_"):
         tf_type = data.split("_")[2]
         user_states[user_id] = {"signal_timeframe": tf_type}
-        await query.message.reply_text("🚀 *Live Signal Started Successfully!* Transmitting real-time signals...", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+        await query.message.edit_text("🚀 *Live Signal Started Successfully!* Transmitting real-time signals...", parse_mode="Markdown")
         asyncio.create_task(run_live_signals(query.message.chat_id, query.bot, tf_type, user_id))
+
+    elif data == "stop_signal":
+        active_signals[user_id] = False
+        await query.answer("🛑 Live Signal Stopped!", show_alert=True)
+        await query.message.edit_text("🛑 *Live Signal Has Been Stopped Successfully.*", parse_mode="Markdown")
 
     elif data == "back_main":
         if user_id in user_states:
@@ -234,25 +232,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
-
-    if text == "🚀 START SIGNAL":
-        tf_type = user_states.get(user_id, {}).get("signal_timeframe", "30s")
-        await update.message.reply_text(f"🚀 *Live Signals Started for {tf_type.upper()}!*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
-        asyncio.create_task(run_live_signals(update.message.chat_id, context.bot, tf_type, user_id))
-        return
-
-    elif text == "🛑 STOP SIGNAL":
-        active_signals[user_id] = False
-        await update.message.reply_text("🛑 *Live Signal Stopped Successfully.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
-        return
-
-    elif text == "« MAIN MENU":
-        if user_id in active_signals:
-            active_signals[user_id] = False
-        if user_id in user_states:
-            del user_states[user_id]
-        await start(update, context)
-        return
 
     if user_id not in user_states or "action" not in user_states[user_id]:
         return
@@ -296,12 +275,13 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 line = f"🔹 `Period: {d['period']} | Num: {d['number']} | Size: {d['size']} | Color: {d['color']}`"
                 response_lines.append(line)
                 
+            keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]]
             if found:
-                await update.message.reply_text("\n".join(response_lines), reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+                await update.message.reply_text("\n".join(response_lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             else:
-                await update.message.reply_text("❌ *Sorry, no data found in Firestore database.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+                await update.message.reply_text("❌ *Sorry, no data found in Firestore database.*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ *Database connection error.*", reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+            await update.message.reply_text("❌ *Database connection error.*", parse_mode="Markdown")
             
         if user_id in user_states:
             del user_states[user_id]
@@ -363,7 +343,8 @@ async def run_live_signals(chat_id, bot, tf_type, user_id):
                     f"🎨 *COLOUR:* `{item['color']}`\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 )
-                await bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown")
+                stop_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP SIGNAL", callback_data="stop_signal")]])
+                await bot.send_message(chat_id=chat_id, text=caption, reply_markup=stop_keyboard, parse_mode="Markdown")
                 
                 await asyncio.sleep(12)
                 if not active_signals.get(user_id, False):
@@ -376,7 +357,7 @@ async def run_live_signals(chat_id, bot, tf_type, user_id):
                         await save_data_to_firestore(col_name, new_item)
                         is_win = new_item['size'] == signal_type
                         status_text = "🎉 *RESULT STATUS: WIN* ✅" if is_win else "❌ *RESULT STATUS: LOSS* ❌"
-                        await bot.send_message(chat_id=chat_id, text=status_text, parse_mode="Markdown")
+                        await bot.send_message(chat_id=chat_id, text=status_text, reply_markup=stop_keyboard, parse_mode="Markdown")
         
         for _ in range(15):
             if not active_signals.get(user_id, False):
