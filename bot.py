@@ -385,7 +385,7 @@ async def run_live_signals(chat_id, bot, tf_type, user_id):
 
 def main():
     keep_alive()
-    TOKEN = "7710381534:AAFCw4hB5Q1E_r0o8vO4Qd1k2S3j4K5L6m7"
+    TOKEN = "8177073363:AAGrp0ndTtV2escKnZw25a1AqIIOnLO_3xw"
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
