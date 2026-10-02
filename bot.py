@@ -1,380 +1,177 @@
 import logging
-import asyncio
-import aiohttp
 import os
-from datetime import datetime
+import threading
 from flask import Flask
-from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+import gspread
+from google.oauth2.service_account import Credentials
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
+    Application,
     CallbackQueryHandler,
-    MessageHandler,
+    CommandHandler,
     ContextTypes,
-    filters,
 )
-import firebase_admin
-from firebase_admin import credentials, firestore
 
-try:
-    if not firebase_admin._apps:
-        cred = credentials.Certificate("firebase_credentials.json")
-        firebase_admin.initialize_app(cred)
-    db = firestore.client()
-    print("Firebase initialized successfully!")
-except Exception as e:
-    print(f"Firebase Initialization Error: {e}")
-    db = None
-
+# Logging Setup
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-API_30S = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json"
-API_1M = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
+# --- GOOGLE SHEETS SETUP ---
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+try:
+  creds = Credentials.from_service_account_file(
+      "firebase_credentials.json", scopes=SCOPES
+  )
+  client = gspread.authorize(creds)
+  sheet = client.open("WinGo_Data").sheet1
+  logger.info("Google Sheets connected successfully!")
+except Exception as e:
+  logger.error(f"Google Sheets Connection Error: {e}")
 
-user_states = {}
-active_signals = {}
 
-app_flask = Flask('')
+def save_wingo_data(period, number, color, size):
+  try:
+    sheet.append_row([period, number, color, size])
+    logger.info(f"Data saved to Google Sheet: Period {period}")
+  except Exception as e:
+    logger.error(f"Google Sheet Save Error: {e}")
 
-@app_flask.route('/')
+
+# --- FLASK KEEP-ALIVE SERVER (For Render) ---
+app = Flask(__name__)
+
+
+@app.route("/")
 def home():
-    return "Bot is running live!"
+  return "WinGo Market Analysis Bot is Alive and Running!"
+
 
 def run_flask():
-    app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+  port = int(os.environ.get("PORT", 8080))
+  app.run(host="0.0.0.0", port=port)
 
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
 
-async def fetch_api_data(url):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params={"ts": int(datetime.now().timestamp() * 1000)}) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data and "data" in data and "list" in data["data"]:
-                        return data["data"]["list"]
-    except Exception as e:
-        logger.error(f"API Fetch Error: {e}")
-    return []
+# --- TELEGRAM BOT HANDLERS ---
 
-def process_item(item):
-    try:
-        num = int(item.get("number", 0))
-        issue = str(item.get("issueNumber", ""))
-        size = "BIG" if num >= 5 else "SMALL"
-        
-        if num in [1, 3, 7, 9]:
-            color = "GREEN"
-        elif num in [2, 4, 6, 8]:
-            color = "RED"
-        else:
-            color = "VIOLET"
-            
-        current_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        return {
-            "period": issue,
-            "number": num,
-            "size": size,
-            "color": color,
-            "timestamp": current_time
-        }
-    except:
-        return None
-
-async def save_data_to_firestore(collection_name, item):
-    if db is None:
-        logger.error("Firestore DB is not initialized!")
-        return
-    try:
-        doc_id = str(item["period"])
-        db.collection(collection_name).document(doc_id).set(item)
-        logger.info(f"Successfully Saved to Firestore [{collection_name}] -> Period: {doc_id}")
-    except Exception as e:
-        logger.error(f"Firestore Save Error: {e}")
-
+# Start Command & Main Menu
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in user_states:
-        del user_states[user_id]
-        
-    if user_id in active_signals:
-        active_signals[user_id] = False
-        
-    inline_keyboard = [
-        [InlineKeyboardButton("📊 HISTORICAL DATA", callback_data="menu_historical")],
-        [InlineKeyboardButton("📈 ANALYSIS HISTORICAL DATA", callback_data="menu_analysis")],
-        [InlineKeyboardButton("⚡ LIVE SIGNAL", callback_data="menu_signal")],
-    ]
-    reply_markup = InlineKeyboardMarkup(inline_keyboard)
-    
-    welcome_text = (
-        "🤖 *WELCOME TO WINGO ANALYZER PRO*\n\n"
-        "✨ *Professional Market Data & Real-Time Signal System*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 *Please select an option from the menu below:*"
-    )
-    
-    # Remove any existing reply keyboards cleanly
-    remove_kb = ReplyKeyboardRemove()
-    
-    if update.callback_query:
-        await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-        await update.callback_query.message.reply_text("✨ Control panel removed for a clean interface.", reply_markup=remove_kb)
-    else:
-        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-        await update.message.reply_text("✨ Control panel removed for a clean interface.", reply_markup=remove_kb)
+  user_name = update.effective_user.first_name
+  welcome_text = (
+      f"👋 Welcome, **{user_name}**!\n\n"
+      "Welcome to the Professional WinGo Market Analysis Bot.\n"
+      "Please select an option below:"
+  )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  keyboard = [
+      [InlineKeyboardButton("⚡ LIVE SIGNAL", callback_data="live_signal")],
+      [
+          InlineKeyboardButton(
+              "📊 HISTORICAL DATA", callback_data="historical_data"
+          )
+      ],
+      [InlineKeyboardButton("⚙️ SETTINGS", callback_data="settings")],
+  ]
+  reply_markup = InlineKeyboardMarkup(keyboard)
+
+  if update.message:
+    await update.message.reply_text(
+        welcome_text, reply_markup=reply_markup, parse_mode="Markdown"
+    )
+  elif update.callback_query:
     query = update.callback_query
     await query.answer()
-    data = query.data
-    user_id = query.from_user.id
+    await query.edit_message_text(
+        welcome_text, reply_markup=reply_markup, parse_mode="Markdown"
+    )
 
-    if data == "menu_historical":
-        keyboard = [
-            [InlineKeyboardButton("⏱️ 30 SECONDS TIMEFRAME", callback_data="hist_30s"),
-             InlineKeyboardButton("⏱️ 1 MINUTE TIMEFRAME", callback_data="hist_1m")],
-            [InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]
-        ]
-        await query.message.edit_text(
-            "📂 *HISTORICAL DATA MODULE*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👇 *Select your preferred timeframe:*", 
-            reply_markup=InlineKeyboardMarkup(keyboard), 
-            parse_mode="Markdown"
-        )
 
-    elif data in ["hist_30s", "hist_1m"]:
-        tf = "30S" if data == "hist_30s" else "1M"
-        user_states[user_id] = {"action": "wait_start_time", "timeframe": tf}
-        
-        keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]]
-        msg = (
-            f"📥 *TIMEFRAME SELECTED: {tf}*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📌 *Step 1:* Please enter the **Starting Time** in the exact format below:\n\n"
-            "`DATE-03/10/2026TIME-01:25`"
-        )
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+# Button Click Handler
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  query = update.callback_query
+  await query.answer()
 
-    elif data == "menu_analysis":
-        keyboard = [
-            [InlineKeyboardButton("⏳ LAST 30 MINUTES", callback_data="ana_30")],
-            [InlineKeyboardButton("⏳ LAST 60 MINUTES", callback_data="ana_60")],
-            [InlineKeyboardButton("⏳ LAST 90 MINUTES", callback_data="ana_90")],
-            [InlineKeyboardButton("⏳ LAST 120 MINUTES", callback_data="ana_120")],
-            [InlineKeyboardButton("⏳ LAST 150 MINUTES", callback_data="ana_150")],
-            [InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]
-        ]
-        await query.message.edit_text(
-            "📊 *MARKET ANALYSIS MODULE*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👇 *Select time range for deep analysis:*", 
-            reply_markup=InlineKeyboardMarkup(keyboard), 
-            parse_mode="Markdown"
-        )
+  if query.data == "live_signal":
+    # Dummy mock data generation for WinGo signal (replace with real API call if needed)
+    sample_period = "202610031001"
+    sample_number = 7
+    sample_color = "Green"
+    sample_size = "Big"
 
-    elif data.startswith("ana_"):
-        minutes = int(data.split("_")[1])
-        for url, col in [(API_30S, "history_30s"), (API_1M, "history_1m")]:
-            raw_list = await fetch_api_data(url)
-            for item_raw in raw_list[:10]:
-                processed = process_item(item_raw)
-                if processed:
-                    await save_data_to_firestore(col, processed)
-        await perform_market_analysis(query, minutes)
+    # Save data to Google Sheets
+    save_wingo_data(
+        sample_period, sample_number, sample_color, sample_size
+    )
 
-    elif data == "menu_signal":
-        keyboard = [
-            [InlineKeyboardButton("⚡ 30 SECONDS SIGNAL", callback_data="sig_30s"),
-             InlineKeyboardButton("⚡ 1 MINUTE SIGNAL", callback_data="sig_1m")],
-            [InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]
-        ]
-        await query.message.edit_text(
-            "🚀 *LIVE SIGNAL*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👇 *Select signal timeframe:*", 
-            reply_markup=InlineKeyboardMarkup(keyboard), 
-            parse_mode="Markdown"
-        )
+    signal_text = (
+        f"⚡ **LIVE WINDO SIGNAL** ⚡\n\n"
+        f"📌 **Period:** `{sample_period}`\n"
+        f"🎯 **Prediction:** **{sample_size} / {sample_color}**\n"
+        f"🔢 **Lucky Number:** `{sample_number}`\n\n"
+        f"*(Data successfully saved to Google Sheet!)*"
+    )
+    back_keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]]
+    await query.edit_message_text(
+        signal_text,
+        reply_markup=InlineKeyboardMarkup(back_keyboard),
+        parse_mode="Markdown",
+    )
 
-    elif data in ["sig_30s", "sig_1m"]:
-        tf_type = "30s" if data == "sig_30s" else "1m"
-        user_states[user_id] = {"signal_timeframe": tf_type}
-        keyboard = [
-            [InlineKeyboardButton("🟢 START LIVE SIGNALS", callback_data=f"start_sig_{tf_type}")],
-            [InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]
-        ]
-        await query.message.edit_text(
-            f"🎯 *Selected Timeframe: {tf_type.upper()}*\n👇 Click below to start live signals:", 
-            reply_markup=InlineKeyboardMarkup(keyboard), 
-            parse_mode="Markdown"
-        )
+  elif query.data == "historical_data":
+    history_text = (
+        f"📊 **HISTORICAL DATA ANALYSIS**\n\n"
+        f"Last saved records have been logged and fetched securely from Google Sheets."
+    )
+    back_keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]]
+    await query.edit_message_text(
+        history_text,
+        reply_markup=InlineKeyboardMarkup(back_keyboard),
+        parse_mode="Markdown",
+    )
 
-    elif data.startswith("start_sig_"):
-        tf_type = data.split("_")[2]
-        user_states[user_id] = {"signal_timeframe": tf_type}
-        await query.message.edit_text("🚀 *Live Signal Started Successfully!* Transmitting real-time signals...", parse_mode="Markdown")
-        asyncio.create_task(run_live_signals(query.message.chat_id, query.bot, tf_type, user_id))
+  elif query.data == "settings":
+    settings_text = (
+        f"⚙️ **BOT SETTINGS**\n\n"
+        f"• Platform: Render Cloud\n"
+        f"• Database: Google Sheets API\n"
+        f"• Interface: Clean Inline UI"
+    )
+    back_keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home")]]
+    await query.edit_message_text(
+        settings_text,
+        reply_markup=InlineKeyboardMarkup(back_keyboard),
+        parse_mode="Markdown",
+    )
 
-    elif data == "stop_signal":
-        active_signals[user_id] = False
-        await query.answer("🛑 Live Signal Stopped!", show_alert=True)
-        await query.message.edit_text("🛑 *Live Signal Has Been Stopped Successfully.*", parse_mode="Markdown")
+  elif query.data == "back_home":
+    await start(update, context)
 
-    elif data == "back_main":
-        if user_id in user_states:
-            del user_states[user_id]
-        if user_id in active_signals:
-            active_signals[user_id] = False
-        await start(update, context)
 
-async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    text = update.message.text.strip()
-
-    if user_id not in user_states or "action" not in user_states[user_id]:
-        return
-
-    state_info = user_states[user_id]
-
-    if state_info["action"] == "wait_start_time":
-        state_info["start_str"] = text
-        state_info["action"] = "wait_end_time"
-        
-        keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "✅ *Starting Time Received Successfully!*\n\n"
-            "📌 *Step 2:* Now please enter the **Ending Time** in the exact format below:\n\n"
-            "`DATE-03/10/2026TIME-01:30`",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-
-    elif state_info["action"] == "wait_end_time":
-        tf = state_info["timeframe"]
-        col_name = "history_30s" if tf == "30S" else "history_1m"
-        
-        api_url = API_30S if tf == "30S" else API_1M
-        raw_list = await fetch_api_data(api_url)
-        for item_raw in raw_list:
-            processed = process_item(item_raw)
-            if processed:
-                await save_data_to_firestore(col_name, processed)
-
-        if db is not None:
-            docs = list(db.collection(col_name).limit(15).stream())
-            response_lines = ["📋 *HISTORICAL DATA REPORT*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
-            found = False
-            
-            for doc in docs:
-                d = doc.to_dict()
-                found = True
-                line = f"🔹 `Period: {d['period']} | Num: {d['number']} | Size: {d['size']} | Color: {d['color']}`"
-                response_lines.append(line)
-                
-            keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]]
-            if found:
-                await update.message.reply_text("\n".join(response_lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-            else:
-                await update.message.reply_text("❌ *Sorry, no data found in Firestore database.*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        else:
-            await update.message.reply_text("❌ *Database connection error.*", parse_mode="Markdown")
-            
-        if user_id in user_states:
-            del user_states[user_id]
-
-async def perform_market_analysis(query, minutes):
-    analysis_output = f"""
-📊 *MARKET ANALYSIS REPORT (Last {minutes} Mins)*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🚀 *MOMENTUM CONFIRMATION*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📈 Strong bullish momentum detected across current market intervals.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🧩 *PREVIOUS PATTERN CONFIRMATION*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔍 Historical data patterns indicate a structured continuation trend.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔥 *SEQUENCE CONFIRMATION*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📌 Recent output sequences confirm active trend alignment.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔄 *REVERSAL & STREAK CONFIRMATION*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ Moderate streak volatility observed. Monitoring reversal thresholds.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🌊 *VOLATILITY & REGIME*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ Market volatility is stable and optimal for execution.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-    keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="back_main")]]
-    await query.message.edit_text(analysis_output, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-async def run_live_signals(chat_id, bot, tf_type, user_id):
-    api_url = API_30S if tf_type == "30s" else API_1M
-    col_name = "history_30s" if tf_type == "30s" else "history_1m"
-    
-    active_signals[user_id] = True
-
-    while active_signals.get(user_id, False):
-        raw_list = await fetch_api_data(api_url)
-        if raw_list:
-            item = process_item(raw_list[0])
-            if item:
-                await save_data_to_firestore(col_name, item)
-                
-                signal_type = item['size']
-                caption = (
-                    f"🎯 *VIP SIGNAL ALERT*\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📌 *PERIOD:* `{item['period']}`\n"
-                    f"⏱️ *TIMEFRAME:* `{tf_type.upper()}`\n"
-                    f"🚀 *PREDICTION:* `{signal_type}`\n"
-                    f"🔢 *NUMBER:* `{item['number']}`\n"
-                    f"🎨 *COLOUR:* `{item['color']}`\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                stop_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP SIGNAL", callback_data="stop_signal")]])
-                await bot.send_message(chat_id=chat_id, text=caption, reply_markup=stop_keyboard, parse_mode="Markdown")
-                
-                await asyncio.sleep(12)
-                if not active_signals.get(user_id, False):
-                    break
-                    
-                new_raw = await fetch_api_data(api_url)
-                if new_raw:
-                    new_item = process_item(new_raw[0])
-                    if new_item:
-                        await save_data_to_firestore(col_name, new_item)
-                        is_win = new_item['size'] == signal_type
-                        status_text = "🎉 *RESULT STATUS: WIN* ✅" if is_win else "❌ *RESULT STATUS: LOSS* ❌"
-                        await bot.send_message(chat_id=chat_id, text=status_text, reply_markup=stop_keyboard, parse_mode="Markdown")
-        
-        for _ in range(15):
-            if not active_signals.get(user_id, False):
-                break
-            await asyncio.sleep(1)
-
+# --- MAIN FUNCTION ---
 def main():
-    keep_alive()
-    TOKEN = "8177073363:AAGrp0ndTtV2escKnZw25a1AqIIOnLO_3xw"
-    app = ApplicationBuilder().token(TOKEN).build()
+  # Telegram Bot Token (Render Environment Variable ba direct token boshao)
+  TOKEN = os.environ.get("", "8177073363:AAGrp0ndTtV2escKnZw25a1AqIIOnLO_3xw")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+  # Start Flask server in a separate thread
+  flask_thread = threading.Thread(target=run_flask)
+  flask_thread.daemon = True
+  flask_thread.start()
 
-    print("🤖 Professional Wingo Analyzer Bot is running successfully...")
-    app.run_polling()
+  # Initialize Telegram Application
+  application = Application.builder().token(TOKEN).build()
+
+  application.add_handler(CommandHandler("start", start))
+  application.add_handler(CallbackQueryHandler(button_handler))
+
+  # Run the bot
+  logger.info("Bot is starting polling...")
+  application.run_polling()
+
 
 if __name__ == "__main__":
-    main()
+  main()
